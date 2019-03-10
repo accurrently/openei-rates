@@ -32,7 +32,9 @@ This package is supposed to do x things:
 
 This project was produced with funding from the [UC Davis Energy Graduate Group](https://energy.ucadavis.edu), the [UC Davis Plug-in Hybrid and Electric Vehicle Research Center](https://phev.ucdavis.edu), and [Office of Naval Research NEPTUNE](https://www.onr.navy.mil/en/Science-Technology/Departments/Code-33/All-Programs/333-sea-platforms-weapons/Neptune)
 
+<!-- This is nice, but it doesn't need to be seen ;)
 This package was created with Cookiecutter_ and the `audreyr/cookiecutter-pypackage`_ project template.
+-->
 
 ## License
 
