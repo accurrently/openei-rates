@@ -1,8 +1,9 @@
 import requests
 import json
 
+from . import logger
 
-class OpenEI_Api(object):
+class OpenEIApi(object):
 
     _rate_endpoint = 'https://api.openei.org/utility_rates'
     _utility_endpoint = 'https://api.openei.org/utility_companies'
@@ -13,35 +14,42 @@ class OpenEI_Api(object):
 
         self.api_key = api_key
         self.zip_code = zip_code
-        self.preffred_unit = 'kWh'
+        self.prefrred_unit = 'kWh'
         self.approved_only = True
     
     def rate_query(self, params: dict = {}):
 
         p = {
             'api_key': self.api_key,
-            'format': OpenEI_Api.response_format,
+            'format': __class__.response_format,
             'approved': 'true' if self.approved_only else 'false',
             'orderby': 'startdate',
             'direction': 'desc'            
         }
         p.update(params)
+        logger.info('Sending request.')
+        r = requests.get(__class__._rate_endpoint, params = p)
+        
+        
+        if r.status_code == 403:
+            logger.error('Invalid API key. Use a valid. key. If you do not have one, get a free one at https://openei.org/services/api/signup/')
+            exit(1)
+        
+        logger.info('Response: HTTP {}'.format(r.status_code))
 
-        r = requests.get(OpenEI_Api._rate_endpoint, params = p)
+        if r.ok():
 
-        try:
+            try:
 
-            j = json.loads(r.json())
+                j = r.json()
 
-            if 'error' in j.keys():
-                return (None, j['error']['code'])
+                return (r.status_code, j)
             
-            return j
+            except ValueError:
+                logger.warn('There was a bad response. This could be the server, or an application bug.')
+                return (None, None)
         
-        except ValueError as ve:
-            return (None, 'BAD RESPONSE')
-        
-        return
+        return (r.status_code, j)
     
     
         
