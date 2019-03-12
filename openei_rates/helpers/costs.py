@@ -1,108 +1,127 @@
 import numba as nb
 import numpy as np
-import pandas as pd
+# import pandas as pd
 
-from .sched import get_tou
+from typing import Callable
+
+from .sched import get_Tier
 from .demand import get_Peak
-from ..data_objects import Tier, TierIndex, Interval
-
-@nb.njit
-def process_period(a: np.array, net: bool, t_coeff: float=1., avg: bool=True):      
-    b = a * t_coeff
-    c = b
-    if not net:
-        c = np.maximum(b, 0.)
-    
-    result = 0.0
-    if avg:
-        result = np.mean(c)
-    else:
-        result = np.sum(c)
-    
-    return result 
-
-@nb.njit
-def get_tou_tier(qty: float, tou: np.array):
-
-    if tou is None:
-        raise ValueError('Supplied schedule array was None')
-    
-    if tou.ndim < 3:
-        raise ValueError('Incorrectly formed schedule array. Must be of dimension 3.')
-
-    # Find the Tier, if there is one.
-    current_tier = None
-
-    if tou is not None:
-        tou_tiers = tou.shape[0]
-
-        i = 0       
-        while i < tou_tiers and qty < tou[i][TierIndex.MAX]:
-            current_tier = tou[i]
-            i += 1       
-
-    return current_tier
-
-@nb.njit
-def get_Tier(qty: float, tou: np.array):
-
-    # We need a non-none tou
-    if tou is None:
-        raise ValueError('Supplied schedule array was None')
-    
-    assert tou.ndim == 2, 'Incorrectly formed schedule array. Must be of dimension 3.'
-    assert tou.shape[1] == TierIndex.ARRAY_LENGTH, 'Incorrectly shaped Tier rows.'
-    i = 0
-    row = np.array([np.inf,0.,0.,0.], dtype=np.float32)
-    while i < tou.shape[0]:
-        row = tou[i,:]
-        if row[TierIndex.MAX] <= 0.:
-            break
-        elif qty <= row[TierIndex.MAX]:        
-            break
-        i += 1
-    
-    return Tier(
-        max=row[TierIndex.MAX],
-        price=row[TierIndex.RATE],
-        adj=row[TierIndex.ADJ],
-        sell=row[TierIndex.SELL]
-    )
-
+from ..data_objects import Tier, TierIndex, Period
+from .demand import peak_period, basic_period
+from .window import (
+    window,
+    month_changed,
+    hour_changed,
+    assign_distribute,
+    assign_end,
+    assign_front,
+    assign_at_index
+)
 
 
 @nb.njit
-def period_cost(
+def energy_cost(
         qty_array: np.array,
         price_struct: np.array,
-        interval: Interval,
-        shedule_a: np.array,
-        schedule_b: np.array=np.empty(0,dtype=np.float32),
-        net_meter: bool=False,
-        t_coeff: float = 1.,
-        avg:bool = True,
-        retail_net:bool = False ):
+        months: np.array,
+        hours: np.array,
+        is_weekend: np.array,
+        wd_schedule: np.array,
+        we_schedule: np.array,
+        interval_time: float,
+        assignment_func=assign_distribute,
+        net_meter: bool = False,
+        retail_net: bool = False):
+    
+    qlen = qty_array.shape[0]
 
-    qty = process_period(qty_array, net_meter, t_coeff, avg)
+    out = np.zeros(qlen, dtype=np.float32)
 
-    tou = get_tou(interval, price_struct, )
+    _window(
+        qty_array,
+        out,
+        price_struct,
+        months,
+        hours,
+        is_weekend,
+        wd_schedule,
+        we_schedule,
+        interval_time,
+        net_meter,
+        hour_changed,
+        basic_period,
+        assignment_func,
+        np.sum
+    )
 
-    tier = get_Tier(qty, )
+    return out
 
+
+@nb.njit
+def tou_demand_cost(
+        qty_array: np.array,
+        price_struct: np.array,
+        months: np.array,
+        hours: np.array,
+        is_weekend: np.array,
+        window_span: int,
+        wd_schedule: np.array,
+        we_schedule: np.array,
+        interval_hours: float,
+        net_meter: bool,
+        normalize: bool = False):
+
+    qlen = qty_array.shape[0]
+
+    out = np.zeros(qlen, dtype=np.float32)
+
+    assign_func = assign_distribute
+    if normalize:
+        assign_func = assign_at_index
+
+    window(
+        qty_array,
+        out,
+        price_struct,
+        months,
+        hours,
+        is_weekend,
+        wd_schedule,
+        we_schedule,
+        interval_hours,
+        net_meter,
+        month_changed,
+        peak_period,
+        assignment_func,
+        np.sum,
+        window_span=window_span
+    )
+
+    return out 
+
+
+@nb.njit
+def flat_demand_cost(
+        qty_array: np.array,
+        price_struct: np.array,
+        month_interval: Interval,
+        schedule: np.array,
+
+        ):
 
 @nb.njit
 def calculate_tou_cost(qty, month, hour, schedule: np.array, struct: np.array):
     """Calculate the cost of the energy for the interval.
     """
     tou = None
-    
+
     try:
         tou = get_tou(month, hour, schedule, struct)
     except IndexError as ie:
         raise ie
 
     tier = get_tou_tier(qty, tou)
-    
+
     rate_price = 0.0
     adj_price = 0.0
 
