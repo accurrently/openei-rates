@@ -2,10 +2,10 @@ import datetime
 from .api import OpenEIApi
 from .rateschedule import RateSchedule
 
-
 class Rate(object):
-    """A Rate object hold metadat about a rate. It pulls down a new RateSchedule only when needed.
+    """A Rate object holds metadata about a rate. It pulls down a new RateSchedule only when needed.
     """
+
     def __init__(self, d: dict):
 
         self.sector = d.get('sector')
@@ -18,6 +18,7 @@ class Rate(object):
         self.source = d.get('source')
         self.source_parent_uri = d.get('sourceparent')
         self.wiring = d.get('phasewiring')
+        self.eia_id = d.get('eia')
 
         start_d = d.get('startdate')
         self.begin_date = datetime.datetime.utcfromtimestamp(start_d) if start_d else None
@@ -25,6 +26,12 @@ class Rate(object):
         self.end_date = datetime.datetime.utcfromtimestamp(end_d) if end_d else None
 
         self.rate_schedule = None
+
+    def __str__(self):
+        return '<{} : {} : {}>'.format(self.label, self.utility, self.name)
+    
+    def __repr__(self):
+        return '<Rate("{}", "{}", "{}")>'.format(self.label, self.utility, self.name)
     
     def is_active(self, dt: datetime.datetime):
         if self.begin_date:
@@ -34,14 +41,14 @@ class Rate(object):
     
     def get_rate_schedule(self, api: OpenEIApi):
         params = {
-            'label': self.label,
+            'getpage': self.label,
             'detail': 'full',
             'limit': 1
         }
-        code, j = api.rate_query(params)
+        code, items = api.rate_query(params)
         
-        if j:
-            self.rate_schedule = RateSchedule(j)
+        if items:
+            self.rate_schedule = RateSchedule(items[0])
 
             return self.rate_schedule
 

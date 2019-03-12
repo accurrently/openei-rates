@@ -33,7 +33,7 @@ class OpenEIRates(object):
             utility: str = '',
             name: str = '',
             active: bool = True,
-            approved: bool = True,
+            only_approved: bool = False,
             sector: str = '',
             replace = False,
             active_date: datetime.datetime = None
@@ -62,7 +62,8 @@ class OpenEIRates(object):
                 add_status.append(name in rate.name)
 
             # Get approval status equality
-            add_status.append(rate.approved == approved)
+            if only_approved:
+                add_status.append(rate.approved)
 
             # See if the rate's sector is in of the allowed sectors of the filter
             if sectors:
@@ -83,7 +84,6 @@ class OpenEIRates(object):
         self,
         address: str,
         active: bool = True,
-        approved: bool = True,
         sector: str = '',
         active_date: datetime.datetime = datetime.datetime.now(),
         replace = True,
@@ -95,23 +95,20 @@ class OpenEIRates(object):
         :type   address: ``str``
         """
         params = {
-            'address': address.title(),
-            'approved': approved
-        }
+            'address': address.title(),        }
         if sector and sector.title() in ['Residential', 'Lighting', 'Commercial', 'Industrial']:
             params['sector'] = sector.title()
 
-        code, j = self.api.rate_query(params)
+        code, items = self.api.rate_query(params)
 
-        if code == 200 and j:
+        if code == 200 and items:
             rates = []
-            for item in j.get('items'):
+            for item in items:
                 rates.append(Rate(item))
 
             return self.filter_rates(
                 rates,
                 active = active,
-                approved = approved,
                 sector = sector,
                 replace = replace
             )
@@ -145,18 +142,16 @@ class OpenEIRates(object):
         params = {
             'getpage': label
         }
-        code, j = self.api.rate_query(params)
+        code, items = self.api.rate_query(params)
 
-        if code == 200 and j:
-            items = j.get('items')
-            if items:
-                rate = Rate(items[0])
-                if rate:
-                    if replace:
-                        self.rates = [rate]
-                    elif append:
-                        self.rates.append(rate)
-                    return rate
+        if code == 200 and items:
+            rate = Rate(items[0])
+            if rate:
+                if replace:
+                    self.rates = [rate]
+                elif append:
+                    self.rates.append(rate)
+                return rate
         return None
 
 
@@ -181,10 +176,10 @@ class OpenEIRates(object):
             label = parsed.path.split('/')[-1]
             rate = self.get_rate_by_label(label, replace=replace, append=append, use_cached=False)
             if not rate:
-                logger.warn('The URL specified wa snot a valid OpenEI rate URL.')
+                logger.warning('The URL specified wa snot a valid OpenEI rate URL.')
             return rate
         except:
-            logger.warn('A malformed URL was provided')
+            logger.warning('A malformed URL was provided')
         return None
 
 

@@ -2,8 +2,10 @@
 import numpy as np
 import numba as nb
 
+from ..data_objects import Peak
+
 @nb.njit
-def get_interval_max_demand(a: np.array, n_intervals: int = 3, floor: float = 0, ceiling: float = 0):
+def get_Peak(qty_array: np.array, n_intervals: int=3):
     """Finds the highest interval average that will be used for a demand charge subject to a floor and ceiling.
 
     When determining n_intervals, it is the responsibility of the calling function or method to supply an appropriate value.
@@ -17,22 +19,37 @@ def get_interval_max_demand(a: np.array, n_intervals: int = 3, floor: float = 0,
             where reported_maximum is constrained by the floor and ceiling, while the actual_maximum is the maximum found.
     :raises: ValueError if n_intervals is <= 0, the array is empty; IndexError if n_intervals >= len(a).
     """
-    if n_intervals <= 0 or not a:
-        raise ValueError
-    length = a.shape[0]
+    if qty_array is None:
+        raise ValueError('None was supplied instead of an array.')
+    
+    assert qty_array.ndem == 1, 'qty_array is of an incorrect dimension.'
+    
+    if n_intervals <= 0:
+        raise ValueError('Invalid number of intervals for interval length.')
+    
+    length = qty_array.shape[0]
+
     if n_intervals > length:
-        raise IndexError
-    dmax = 0.0
+        raise IndexError('qty_array is smaller than the interval window.')
+
+    demand = 0.
     idx = 0
+    interval_demand = 0.
+    interval_idx = 0
     for i in range(length - n_intervals):
-        x = a[i:i+3].sum()
-        if x > dmax:
-            dmax = x
+        x = qty_array[i:i+n_intervals].sum()
+        y = qty_array[i]
+        if x > demand:
+            demand = x
             idx = i
-    reported = dmax
-    if floor > 0:
-        reported = max(floor, reported)
-    if ceiling > 0:
-        reported = min(ceiling, reported)
-    return (idx, reported, dmax)
+        if y > interval_demand:
+            interval_demand = y
+            interval_idx = i
+
+    return Peak(
+        index = idx,
+        qty=demand,
+        peak_interval_index=interval_idx,
+        peak_interval_qty=interval_demand
+    )
 

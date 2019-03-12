@@ -1,24 +1,17 @@
 import numpy as np
 import datetime
 import pandas as pd
-import enum
 from pandas.tseries.holiday import AbstractHolidayCalendar
 from pandas.tseries.holiday import USFederalHolidayCalendar
 
-from .helpers.sched import get_flat_month, get_tou_info
-from .helpers.costs import get_tou_tier, get_tou_info, calculate_flat_cost, calculate_tou_cost
+from .helpers.sched import get_tou
+from .helpers.costs import get_tou_tier, get_tou, calculate_flat_cost, calculate_tou_cost, process_period, period_cost
 
-from .helpers.demand import get_interval_max_demand
+from .helpers.demand import get_Peak
 
 from . import logger
 
-class RateIndex(enum.IntEnum):
-    MAX_USE = 0
-    RATE = 1
-    ADJ = 2
-    SELL = 3
-
-    ARRAY_LENGTH = 4
+from .data_objects import Peak, Tier
 
 class RateSchedule(object):
     """Contains all the pricing and time-of-use (TOU) information for a particular rate.
@@ -28,6 +21,23 @@ class RateSchedule(object):
     default_end_date = AbstractHolidayCalendar.end_date
     weekmask = [0, 1, 2, 3, 4 ] # Workdays
     default_demand_window = 15
+
+    class SType(object):
+        __slots__ = ()
+        ENERGY = 'energy'
+        TOU_DEMAND = 'tou_demand'
+        FLAT_DEMAND = 'flat_demand'
+        COINCIDENT = 'coincident'
+
+        DEMANDS = {TOU_DEMAND, FLAT_DEMAND}
+        DEMANDS_AND_COI = {TOU_DEMAND, FLAT_DEMAND, COINCIDENT}
+        MONTH_ONLY = {FLAT_DEMAND}
+
+        ALL = {ENERGY, TOU_DEMAND, FLAT_DEMAND, COINCIDENT}
+
+        @classmethod
+        def is_valid(cls, s: str):
+            return s.lower() in cls.SType.ALL
 
     def __init__(
         self,
@@ -58,6 +68,8 @@ class RateSchedule(object):
         
 
         end_dt = rate_info.get('enddate', None)
+
+        self.features = set({})
         
         if begin_dt and end_dt:
 
@@ -67,6 +79,8 @@ class RateSchedule(object):
                 )
         else:
             self.holidays = holiday_calendar.holidays()
+
+        self.label = rate_info.get('label')
 
         # A fallback price in case things get weird.
         self.default_energy_price = default_price
@@ -82,7 +96,7 @@ class RateSchedule(object):
         self.demand_maximum = rate_info.get('peakkwcapacitymax', 0)
 
         # How long is our window for demand? (in minutes). 
-        self.demand_window = rate_info.get('demandratewindow', __class__.default_demand_window)
+        self.demand_window = rate_info.get('demandratewindow', RateSchedule.default_demand_window)
 
         # Rate Structures
         # A rate structure is essentially a list of lists with rate information
@@ -92,10 +106,10 @@ class RateSchedule(object):
 
         # Demand charges
         d_rate_struct = rate_info.get('demandratestructure')
-        self.demand_rates = __class__.build_rate_structure(d_rate_struct)    
+        self.demand_rates = RateSchedule.build_rate_structure(d_rate_struct)    
 
         d_flat_struct = rate_info.get('flatdemandstructure')
-        self.flat_demand_rates = __class__.build_rate_structure(d_flat_struct)  
+        self.flat_demand_rates = RateSchedule.build_rate_structure(d_flat_struct)  
 
         # Coincident
         c_rate_struct = rate_info.get('coincidentratestructure')
@@ -150,7 +164,17 @@ class RateSchedule(object):
 
         # Net metering?
         self.use_net_metering = rate_info.get('usenetmetering', False)
+    
+    def __str__(self):
+        coin_ = 'coincident ' if (self.coincident_rates is not None) and (self.coincident_schedule is not None) else ''
+        nrg_ = 'energy ' if (self.energy_rates is not None) and (self.energy_weekday_schedule is not None) and (self.energy_weekend_schedule is not None) else ''
+        dem_ = 'tou_demand ' if (self.demand_rates is not None) and (self.demand_weekday_schedule is not None) and (self.demand_weekend_schedule is not None) else ''
+        flt_ = 'flat_demand ' if (self.flat_demand_months is not None) and (self.flat_demand_rates is not None) else ''
 
+        return '<RateSchedule {}: {}{}{}{}>'.format(self.label, coin_, nrg_, dem_, flt_)
+    
+    def __repr__(self):
+        return '<RateSchedule({})>'.format(self.label)
 
     @classmethod
     def build_rate_structure(cls, struct: list):
@@ -163,7 +187,7 @@ class RateSchedule(object):
         :param  struct: A list of rates and rate information. A 3-dimensional ``list`` (a ``list`` of ``list``s of ``list``s).
         :type   struct: ``list``
 
-        :return:    A 3-dimensional  ``numpy.array`` of type ``numpy.float16``
+        :return:    A 3-dimensional  ``numpy.array`` of type ``numpy.float32``
                     or ``None`` if **struct** is ``None``.
         """
         if struct:
@@ -173,15 +197,15 @@ class RateSchedule(object):
                 
                 for tier in period:
                     tier_a = [0 for i in range(RateIndex.ARRAY_LENGTH)]
-                    tier_a[RateIndex.MAX_USE] = tier.get('max', 0)
-                    tier_a[RateIndex.RATE] = tier.get('rate', 0)
-                    tier_a[RateIndex.ADJ] = tier.get('rate', 0)
-                    tier_a[RateIndex.SELL] = tier.get('sell', 0)
+                    tier_a[RateIndex.MAX_USE] = tier.get('max', 0.0)
+                    tier_a[RateIndex.RATE] = tier.get('rate', 0.0)
+                    tier_a[RateIndex.ADJ] = tier.get('rate', 0.0)
+                    tier_a[RateIndex.SELL] = tier.get('sell', 0.0)
                     period_a.append(tier_a)
                 
                 struct_a.append(period_a)
             
-            return np.array(struct_a, dtype=np.float16)
+            return np.array(struct_a, dtype=np.float32)
 
         return None
     
@@ -224,6 +248,22 @@ class RateSchedule(object):
         
         return None
 
+    def _cost(self, s: pd.Series, rtype: str):
+
+        if rtype.lower() not in self.SType.ALL:
+            raise ValueError('"{}" is not a valid rate schedule type. rtype must be one of {}'.format(rtype.lower(), self.SType.ALL))
+        
+        lookup_day_type = (rtype in {self.SType.ENERGY, self.SType.TOU_DEMAND})
+        use_flat = rtype == self.SType.FLAT_DEMAND
+
+        # Demand
+        if rtype in {self.SType.FLAT_DEMAND, self.SType.TOU_DEMAND}:
+            idx, reported_val, max_val = get_interval_max_demand(ser.values, n_intervals=demand_window_intervals)
+
+
+
+
+
 
 
     def get_costs(
@@ -251,7 +291,7 @@ class RateSchedule(object):
         :raises:    ``IndexError`` if **demand_series** does not have an index of type ``pandas.DatetimeIndex``.
         """
 
-        if (not demand_series) or (not demand_series.size > 2):
+        if (demand_series.empty) or (demand_series.size <= 2):
             return None
         
         if not (isinstance(demand_series.index, pd.DatetimeIndex)):
@@ -278,16 +318,20 @@ class RateSchedule(object):
         demand_window_intervals = round( interval_delta / pd.Timedelta('{}min'.format(self.demand_window)))
 
         # First, check out these demand charges
-        if self.demand_rates and self.demand_weekday_schedule and self.demand_weekend_schedule:
+        if (self.demand_rates is not None) and (self.demand_weekday_schedule is not None) and (self.demand_weekend_schedule is not None):
 
             def get_demand_cost(ser: pd.Series):
                 idx, reported_val, max_val = get_interval_max_demand(ser.values, n_intervals=demand_window_intervals)
                 ts = ser.reset_index()['index'].iloc[idx]
+                cost = 0.0
+                try:
                 # if we're on a holiday or weekend
-                if ts in self.holidays or ts.dayofweek not in __class__.weekmask:
-                    return calculate_tou_cost(reported_val, ts.month, ts.hour, self.demand_weekend_schedule, self.demand_rates)
-                # Otherwise, it's a weekday
-                return calculate_tou_cost(reported_val, ts.month, ts.hour, self.demand_weekday_schedule, self.demand_rates)
+                    if ts.date() in self.holidays or ts.dayofweek not in self.weekmask:
+                        cost = calculate_tou_cost(reported_val, ts.month, ts.hour, self.demand_weekend_schedule, self.demand_rates)
+                    # Otherwise, it's a weekday
+                    cost = calculate_tou_cost(reported_val, ts.month, ts.hour, self.demand_weekday_schedule, self.demand_rates)
+                except:
+                    pass
 
             if distribute_monthly:
                 # Set every interval to have the value evenly distributed
@@ -301,13 +345,13 @@ class RateSchedule(object):
             df['tou_demand_cost'] = 0
                 
         # Now do the same for flat demand
-        if self.flat_demand_months and self.flat_demand_rates:
+        if (self.flat_demand_months is not None) and (self.flat_demand_rates is not None):
 
             def get_flat_demand_cost(ser: pd.Series):
                 idx, reported_val, max_val = get_interval_max_demand(ser.values, n_intervals=demand_window_intervals)
                 ts = ser.reset_index()['index'].iloc[idx]
                 # if we're on a holiday or weekend
-                if ts in self.holidays or ts.dayofweek not in __class__.weekmask:
+                if ts in self.holidays or ts.dayofweek not in self.weekmask:
                     return calculate_flat_cost(reported_val, ts.month, self.flat_demand_months, self.flat_demand_rates)
                 # Otherwise, it's a weekday
                 return calculate_flat_cost(reported_val, ts.month, self.flat_demand_months, self.flat_demand_rates)
@@ -322,7 +366,7 @@ class RateSchedule(object):
             df['flat_demand_cost'] = 0
             
         # Coincident charges
-        if self.coincident_rates and self.coincident_schedule:
+        if (self.coincident_rates is not None) and (self.coincident_schedule is not None):
             c = df.reset_index()
             df['coincident_cost'] = c.apply(lambda x: calculate_tou_cost(
                 x['qty'],
@@ -336,41 +380,47 @@ class RateSchedule(object):
             df['coincident_cost'] = 0 # __THAT WAS EASY__
             
 
-            # Energy!
-            if self.energy_rates and self.energy_weekday_schedule and self.energy_weekend_schedule:
+        # Energy!
+        if (self.energy_rates is not None) and (self.energy_weekday_schedule is not None) and (self.energy_weekend_schedule is not None):
 
-                def get_energy_cost(qty: float, ts: pd.Timestamp):
-                    # if we're on a holiday or weekend
-                    if ts in self.holidays or ts.dayofweek not in __class__.weekmask:
-                        return calculate_tou_cost(qty * interval_hours, ts.month, ts.hour, self.energy_weekend_schedule, self.energy_rates)        
-                    return calculate_tou_cost(qty * interval_hours, ts.month, ts.hour, self.energy_weekday_schedule, self.energy_rates)
-                
-                df['energy_cost'] = df.reset_index().apply(
-                    (lambda x: get_energy_cost(x['qty'], x['index'])), 
-                    axis=1
-                    )
-            else:
-                df['energy_cost'] = df['qty'].apply(lambda x: x * interval_hours * self.default_energy_price)
-
-            # Monthly fixed costs
+            def get_energy_cost(qty: float, ts: pd.Timestamp):
+                # if we're on a holiday or weekend
+                cost = 0.0
+                try:
+                    if ts in self.holidays or ts.dayofweek not in RateSchedule.weekmask:
+                        cost = calculate_tou_cost(qty * interval_hours, ts.month, ts.hour, self.energy_weekend_schedule, self.energy_rates)        
+                    else:
+                        cost = calculate_tou_cost(qty * interval_hours, ts.month, ts.hour, self.energy_weekday_schedule, self.energy_rates)
+                except IndexError as ie:
+                    logger.error('An IndexError was raised: {}'.format(ie))
+                return cost
             
-            fixed_total = self.fixed_monthly_charge
+            df['energy_cost'] = df.reset_index().apply(
+                (lambda x: get_energy_cost(x['qty'], x['index'])), 
+                axis=1
+                )
+        else:
+            df['energy_cost'] = df['qty'].apply(lambda x: x * interval_hours * self.default_energy_price)
 
-            if distribute_monthly:
-                df['fixed_cost'] = df.groupby(mg)['qty'].transform(lambda x: fixed_total / x.size)
-            else:
-                df['fixed_cost'] = df.groupby(mg).agg(lambda x: fixed_total)
-                        
-            # If we need to sum everything up, let's do it
-            df['total'] = df.apply(
-                lambda x: x['energy_cost'] + x['tou_demand_cost'] + x['coincident_cost'] + x['flat_demand_cost'] + x['fixed_cost']
-            )
+        # Monthly fixed costs
+        
+        fixed_total = self.fixed_monthly_charge
 
-            # Finally, aggregate according to the needed aggregation scheme
+        if distribute_monthly:
+            df['fixed_cost'] = df.groupby(mg)['qty'].transform(lambda x: fixed_total / x.size)
+        else:
+            df['fixed_cost'] = df.groupby(mg).agg(lambda x: fixed_total)
+                    
+        # If we need to sum everything up, let's do it
+        df['total'] = df.apply(
+            lambda x: x['energy_cost'] + x['tou_demand_cost'] + x['coincident_cost'] + x['flat_demand_cost'] + x['fixed_cost']
+        )
 
-            df = df[['qty', 'energy_cost', 'tou_demand_cost', 'coincident_cost', 'flat_demand_cost', 'fixed_cost']]
+        # Finally, aggregate according to the needed aggregation scheme
 
-            return df.groupby(grouper).agg(sum)
+        df = df[['qty', 'energy_cost', 'tou_demand_cost', 'coincident_cost', 'flat_demand_cost', 'fixed_cost']]
+
+        return df.groupby(grouper).agg(sum)
 
 
                 

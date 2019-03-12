@@ -1,0 +1,45 @@
+from typing import NamedTuple
+
+TierIndex = NamedTuple(
+    'TierIndexNT',
+    [
+        ('MAX', int),
+        ('RATE', int),
+        ('ADJ', int),
+        ('SELL', int),
+        ('ARRAY_LENGTH', int)   
+    ]
+)(0, 1, 2, 3, 4)
+
+class Interval(NamedTuple):
+    length: float
+    month: int
+    hour: int
+    weekend: bool
+
+
+class Tier(NamedTuple):
+    max: float
+    price: float
+    adj: float
+    sell: float
+
+    def isin(self, qty: float):
+        return qty <= self.max if self.max > 0.0 else True
+
+class Peak(NamedTuple):
+    index: int
+    qty: float
+    peak_interval_index: int
+    peak_interval_qty: float
+
+    def clip(self, ceiling: float=None, floor: float=None):
+        a = self.qty
+        if floor is not None:
+            a = max(floor, a)
+        if ceiling is not None:
+            a = min(ceiling, a)
+        return a
+    
+
+

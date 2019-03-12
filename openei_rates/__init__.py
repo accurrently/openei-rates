@@ -7,9 +7,12 @@ __email__ = 'amcampbell@ucdavis.edu'
 __version__ = '0.1.0'
 
 
-from .rateschedule import *
-from .api import *
-from .openei_rates import *
+__all__ = [
+    "rateschedule",
+    "rate",
+    "api",
+    "openei_rates",
+]
 
 import logging
 import os
